@@ -95,7 +95,7 @@ from .composite_compliance import no_dispatch
 
 torch.backends.disable_global_flags()
 
-PYTEST_FILES = ["test_ops", "test_ops_gradients", "test_ops_jit"]
+PYTEST_FILES = []
 
 FILE_SCHEMA = "file://"
 if sys.platform == 'win32':
@@ -567,7 +567,7 @@ def wait_for_process(p):
         # Always call p.wait() to ensure exit
         p.wait()
 
-def shell(command, cwd=None, env=None):
+def shell(command, cwd=None, env=None, stdout=None, stderr=None):
     sys.stdout.flush()
     sys.stderr.flush()
     # The following cool snippet is copied from Py3 core library subprocess.call
@@ -578,7 +578,7 @@ def shell(command, cwd=None, env=None):
     #
     # https://github.com/python/cpython/blob/71b6c1af727fbe13525fb734568057d78cea33f3/Lib/subprocess.py#L309-L323
     assert not isinstance(command, torch._six.string_classes), "Command to shell should be a list or tuple of tokens"
-    p = subprocess.Popen(command, universal_newlines=True, cwd=cwd, env=env)
+    p = subprocess.Popen(command, universal_newlines=True, cwd=cwd, env=env, stdout=stdout, stderr=stderr)
     return wait_for_process(p)
 
 
@@ -767,7 +767,7 @@ def run_tests(argv=UNITTEST_ARGS):
             # f = failed
             # E = error
             # X = unexpected success
-            exit_code = pytest.main(args=[inspect.getfile(sys._getframe(1)), f'-n={num_procs}', '-vv', '-x',
+            exit_code = pytest.main(args=[inspect.getfile(sys._getframe(1)), '-vv', '-x',
                                     '--reruns=2', '-rfEX', f'--junit-xml-reruns={pytest_report_path}'])
             del os.environ["USING_PYTEST"]
             sanitize_pytest_xml(f'{pytest_report_path}')
@@ -903,6 +903,12 @@ TEST_SKIP_FAST = os.getenv('PYTORCH_TEST_SKIP_FAST', '0') == '1'
 # correction, before throwing out the extra compute and proceeding
 # as we had before.  By default, we don't run these tests.
 TEST_WITH_CROSSREF = os.getenv('PYTORCH_TEST_WITH_CROSSREF', '0') == '1'
+
+
+if (
+    TEST_CUDA and 'PARALLEL_TESTING' in os.environ
+):
+    torch.cuda.set_per_process_memory_fraction(0.21)
 
 def skipIfCrossRef(fn):
     @wraps(fn)

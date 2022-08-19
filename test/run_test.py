@@ -8,12 +8,14 @@ from distutils.version import LooseVersion
 import functools
 import os
 import pathlib
+import queue
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import json
+import multiprocessing as mp
 from typing import Dict, Optional, List, cast, Any
 
 import torch
@@ -125,7 +127,6 @@ TESTS = discover_tests(
         "distributed/elastic/utils/util_test",
         "distributed/elastic/utils/distributed_test",
         "distributed/elastic/multiprocessing/api_test",
-        "test_deploy",
     ]
 )
 
@@ -333,6 +334,7 @@ def discover_functorch_tests():
     assert len(result) >= 8
     return result
 
+
 FUNCTORCH_TESTS = discover_functorch_tests()
 
 TESTS_REQUIRING_LAPACK = [
@@ -360,6 +362,11 @@ def get_executable_command(options, allow_pytest, disable_coverage=False):
     return executable
 
 
+def get_log_file_name(test):
+    no_directories = test.replace("\\", "-").replace("/", "-")
+    return f"{no_directories}.log"
+
+
 def run_test(
     test_module,
     test_directory,
@@ -367,6 +374,7 @@ def run_test(
     launcher_cmd=None,
     extra_unittest_args=None,
     env=None,
+    log_to_file=False,
 ):
     unittest_args = options.additional_unittest_args.copy()
     if options.verbose:
@@ -397,6 +405,9 @@ def run_test(
 
     command = (launcher_cmd or []) + executable + argv
     print_to_stderr("Executing {} ... [{}]".format(command, datetime.now()))
+    if log_to_file:
+        with open(get_log_file_name(test_module), "w") as f:
+            return shell(command, test_directory, stdout=f, stderr=f, env=env)
     return shell(command, test_directory, env=env)
 
 
@@ -904,6 +915,23 @@ def exclude_tests(exclude_list, selected_tests, exclude_message=None):
     return selected_tests
 
 
+def must_serial(file: str) -> bool:
+    build_environment = os.getenv("BUILD_ENVIRONMENT", "linux cuda")
+    if "linux" in build_environment and "cuda" in build_environment:
+        return True
+    if (
+        file in CUSTOM_HANDLERS or
+        "distributed" in os.getenv("TEST_CONFIG", "") or
+        file in RUN_PARALLEL_BLOCKLIST or
+        "distributed" in file
+    ):
+        return True
+    else:
+        return file in ['test_nn', 'test_fake_tensor', 'test_cpp_api_parity', 'test_jit_cuda_fuser', 'test_reductions',
+                        'test_cuda', 'test_indexing', 'test_fx_backends', 'test_linalg', 'test_cpp_extensions_jit',
+                        'test_torch', 'test_tensor_creation_ops', 'test_sparse_csr', 'test_dispatch']
+
+
 def get_selected_tests(options):
     selected_tests = options.include
 
@@ -1003,11 +1031,12 @@ def get_selected_tests(options):
             print(
                 "::warning:: Gathered no stats from artifacts. Proceeding with default sharding plan."
             )
-            selected_tests = selected_tests[which_shard - 1 :: num_shards]
+            selected_tests = selected_tests[which_shard - 1:: num_shards]
         else:
             print("Found test time stats from artifacts")
             test_file_times_config = test_file_times[test_config]
-            shards = calculate_shards(num_shards, selected_tests, test_file_times_config)
+            shards = calculate_shards(num_shards, selected_tests, test_file_times_config,
+                                      is_special_file=must_serial)
             _, tests_from_shard = shards[which_shard - 1]
             selected_tests = tests_from_shard
 
@@ -1024,16 +1053,19 @@ def get_selected_tests(options):
     return selected_tests
 
 
-def run_test_module(test: str, test_directory: str, options) -> Optional[str]:
+def run_test_module(test: str, test_directory: str, options, log_to_file: bool = False) -> Optional[str]:
     test_module = parse_test_module(test)
 
     # Printing the date here can help diagnose which tests are slow
     print_to_stderr("Running {} ... [{}]".format(test, datetime.now()))
     handler = CUSTOM_HANDLERS.get(test_module, run_test)
-    return_code = handler(test_module, test_directory, options)
+    if log_to_file and handler == run_test:
+        return_code = handler(test_module, test_directory, options, log_to_file=log_to_file)
+    else:
+        return_code = handler(test_module, test_directory, options)
     assert isinstance(return_code, int) and not isinstance(
         return_code, bool
-    ), "Return code should be an integer"
+    ), f"While running {test} got non integer return code {return_code}"
     if return_code == 0:
         return None
 
@@ -1044,6 +1076,39 @@ def run_test_module(test: str, test_directory: str, options) -> Optional[str]:
         signal_name = SIGNALS_TO_NAMES_DICT[-return_code]
         message += f" Received signal: {signal_name}"
     return message
+
+
+def print_log_file(test):
+    log_file = get_log_file_name(test)
+    with open(log_file, "r") as f:
+        print(f'##[group]PRINT LOG FILE of {test} ({log_file})')
+        print(f.read())
+        print('##[endgroup]')
+        print(f"FINISHED PRINT LOG FILE of {test} ({log_file})")
+    os.remove(log_file)
+
+
+def mp_run_test_module(test_tasks: mp.Queue, ret_queue: mp.Queue, abort_queue: mp.Queue, test_directory, options):
+    try:
+        while abort_queue.empty():
+            test = test_tasks.get_nowait()
+            message = run_test_module(test, test_directory, options, log_to_file=True)
+            ret_queue.put_nowait((test, message))
+    except queue.Empty as e:
+        return
+
+
+def handle_test_completion(ret_queue: mp.Queue, abort_queue: mp.Queue, failure_messages, continue_on_error):
+    test, err_message = ret_queue.get()
+    print_log_file(test)
+    if err_message is None:
+        return True
+    failure_messages.append(err_message)
+    if not continue_on_error:
+        abort_queue.put_nowait("stop")
+        raise RuntimeError(err_message)
+    print_to_stderr(err_message)
+    return False
 
 
 def main():
@@ -1066,10 +1131,31 @@ def main():
         # downloading test cases configuration to local environment
         get_test_case_configs(dirpath=test_directory)
 
-    has_failed = False
     failure_messages = []
+
+    selected_tests_parallel = [x for x in selected_tests if not must_serial(x)]
+    selected_tests_serial = [x for x in selected_tests if x not in selected_tests_parallel]
+
+    test_tasks = mp.Queue()
+    ret_queue = mp.Queue()
+    abort_queue = mp.Queue()
+    for test in selected_tests_parallel:
+        test_tasks.put(test)
+    procs = []
+    proc_limit = 3
     try:
-        for test in selected_tests:
+        os.environ['PARALLEL_TESTING'] = '1'
+        for i in proc_limit:
+            p = mp.Process(target=mp_run_test_module, args=(
+                test_tasks, ret_queue, abort_queue, test_directory, copy.deepcopy(options)))
+            procs.append(p)
+
+        for i in range(len(selected_tests_parallel)):
+            handle_test_completion(ret_queue, abort_queue, failure_messages, options.continue_on_error)
+
+        del os.environ['PARALLEL_TESTING']
+
+        for test in selected_tests_serial:
             options_clone = copy.deepcopy(options)
             if test in USE_PYTEST_LIST:
                 options_clone.pytest = True
@@ -1082,6 +1168,11 @@ def main():
                 raise RuntimeError(err_message)
             print_to_stderr(err_message)
     finally:
+        for p in procs:
+            p.join()
+        while not ret_queue.empty():
+            handle_test_completion(ret_queue, abort_queue, failure_messages, options.continue_on_error)
+
         if options.coverage:
             from coverage import Coverage
 
@@ -1094,7 +1185,7 @@ def main():
                 if not PYTORCH_COLLECT_COVERAGE:
                     cov.html_report()
 
-    if options.continue_through_error and has_failed:
+    if options.continue_through_error and len(failure_messages) != 0:
         for err in failure_messages:
             print_to_stderr(err)
         sys.exit(1)
