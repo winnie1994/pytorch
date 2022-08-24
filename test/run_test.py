@@ -545,13 +545,13 @@ def test_distributed(test_module, test_directory, options):
         print_to_stderr("MPI not available -- MPI backend tests will be skipped")
     config = DISTRIBUTED_TESTS_CONFIG
     procs = []
+    import multiprocessing as mp
     ret_queue = mp.Queue()
     for backend, env_vars in config.items():
         if sys.platform == "win32" and backend != "gloo":
             continue
         if backend == "mpi" and not mpi_available:
             continue
-        import multiprocessing as mp
         p = mp.Process(target=test_distributed_config, args=(
             test_module, ret_queue, test_directory, options, backend, env_vars))
         p.start()
