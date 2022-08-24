@@ -361,7 +361,7 @@ def get_executable_command(options, allow_pytest, disable_coverage=False):
 
 
 def run_test(
-    test_module, test_directory, options, launcher_cmd=None, extra_unittest_args=None
+    test_module, test_directory, options, launcher_cmd=None, extra_unittest_args=None, log_file_fd=None,
 ):
     unittest_args = options.additional_unittest_args.copy()
     if options.verbose:
@@ -392,6 +392,8 @@ def run_test(
 
     command = (launcher_cmd or []) + executable + argv
     print_to_stderr("Executing {} ... [{}]".format(command, datetime.now()))
+    if log_file_fd is not None:
+        return shell(command, test_directory, stdout=log_file_fd, stderr=log_file_fd)
     return shell(command, test_directory)
 
 
@@ -477,6 +479,7 @@ def test_cpp_extensions_aot_no_ninja(test_module, test_directory, options):
 
 def test_distributed_config(test_module, ret_queue, test_directory, options, backend, env_vars):
     return_code = 0
+    log_file_fd, log_file_path = tempfile.mkstemp()
     for with_init_file in {True, False}:
         if sys.platform == "win32" and not with_init_file:
             return
@@ -526,14 +529,15 @@ def test_distributed_config(test_module, ret_queue, test_directory, options, bac
 
                 mpiexec = ["mpiexec", "-n", "3", noprefix_opt, allowrunasroot_opt]
 
-                return_code = run_test(test_module, test_directory, options, launcher_cmd=mpiexec)
+                return_code = run_test(test_module, test_directory, options,
+                                       launcher_cmd=mpiexec, log_file_fd=log_file_fd)
             else:
-                return_code = run_test(test_module, test_directory, options, extra_unittest_args=["--subprocess"])
+                return_code = run_test(test_module, test_directory, options, extra_unittest_args=[
+                                       "--subprocess"], log_file_fd=log_file_fd)
         finally:
             shutil.rmtree(tmp_dir)
             os.environ.clear()
-            ret_queue.put_nowait(return_code)
-
+            ret_queue.put_nowait((return_code, log_file_path))
 
 
 def test_distributed(test_module, test_directory, options):
@@ -556,12 +560,18 @@ def test_distributed(test_module, test_directory, options):
             test_module, ret_queue, test_directory, options, backend, env_vars))
         p.start()
         procs.append(p)
+    ret_code = 0
     for p in procs:
         p.join()
-        ret_code = ret_queue.get()
-        if ret_code != 0:
-            return ret_code
-    return 0
+        proc_ret_code, log_file_path = ret_queue.get()
+        if proc_ret_code != 0:
+            ret_code = proc_ret_code
+        with open(log_file_path, "r") as f:
+            print()
+            print(f.read())
+            print()
+        os.remove(log_file_path)
+    return ret_code
 
 
 def run_doctests(test_module, test_directory, options):
