@@ -332,6 +332,7 @@ def discover_functorch_tests():
     assert len(result) >= 8
     return result
 
+
 FUNCTORCH_TESTS = discover_functorch_tests()
 
 TESTS_REQUIRING_LAPACK = [
@@ -474,6 +475,67 @@ def test_cpp_extensions_aot_no_ninja(test_module, test_directory, options):
     return _test_cpp_extensions_aot(test_directory, options, use_ninja=False)
 
 
+def test_distributed_config(test_module, ret_queue, test_directory, options, backend, env_vars):
+    return_code = 0
+    for with_init_file in {True, False}:
+        if sys.platform == "win32" and not with_init_file:
+            return
+        tmp_dir = tempfile.mkdtemp()
+        if options.verbose:
+            init_str = "with {} init_method"
+            with_init = init_str.format("file" if with_init_file else "env")
+            print_to_stderr(f"Running distributed tests for the {backend} backend {with_init}")
+        os.environ["TEMP_DIR"] = tmp_dir
+        os.environ["BACKEND"] = backend
+        os.environ["INIT_METHOD"] = "env://"
+        os.environ.update(env_vars)
+        if with_init_file:
+            if test_module == "test_distributed_spawn":
+                init_method = f"{FILE_SCHEMA}{tmp_dir}/"
+            else:
+                init_method = f"{FILE_SCHEMA}{tmp_dir}/shared_init_file"
+            os.environ["INIT_METHOD"] = init_method
+        try:
+            os.mkdir(os.path.join(tmp_dir, "barrier"))
+            os.mkdir(os.path.join(tmp_dir, "test_dir"))
+            if backend == "mpi":
+                # test mpiexec for --noprefix option
+                with open(os.devnull, "w") as devnull:
+                    allowrunasroot_opt = (
+                        "--allow-run-as-root"
+                        if subprocess.call(
+                            'mpiexec --allow-run-as-root -n 1 bash -c ""',
+                            shell=True,
+                            stdout=devnull,
+                            stderr=subprocess.STDOUT,
+                        )
+                        == 0
+                        else ""
+                    )
+                    noprefix_opt = (
+                        "--noprefix"
+                        if subprocess.call(
+                            f'mpiexec {allowrunasroot_opt} -n 1 --noprefix bash -c ""',
+                            shell=True,
+                            stdout=devnull,
+                            stderr=subprocess.STDOUT,
+                        )
+                        == 0
+                        else ""
+                    )
+
+                mpiexec = ["mpiexec", "-n", "3", noprefix_opt, allowrunasroot_opt]
+
+                return_code = run_test(test_module, test_directory, options, launcher_cmd=mpiexec)
+            else:
+                return_code = run_test(test_module, test_directory, options, extra_unittest_args=["--subprocess"])
+        finally:
+            shutil.rmtree(tmp_dir)
+            os.environ.clear()
+            ret_queue.put_nowait(return_code)
+
+
+
 def test_distributed(test_module, test_directory, options):
     # MPI tests are broken with Python-3.9
     mpi_available = subprocess.call(
@@ -482,76 +544,23 @@ def test_distributed(test_module, test_directory, options):
     if options.verbose and not mpi_available:
         print_to_stderr("MPI not available -- MPI backend tests will be skipped")
     config = DISTRIBUTED_TESTS_CONFIG
+    procs = []
+    ret_queue = mp.Queue()
     for backend, env_vars in config.items():
         if sys.platform == "win32" and backend != "gloo":
             continue
         if backend == "mpi" and not mpi_available:
             continue
-        for with_init_file in {True, False}:
-            if sys.platform == "win32" and not with_init_file:
-                continue
-            tmp_dir = tempfile.mkdtemp()
-            if options.verbose:
-                init_str = "with {} init_method"
-                with_init = init_str.format("file" if with_init_file else "env")
-                print_to_stderr(
-                    "Running distributed tests for the {} backend {}".format(
-                        backend, with_init
-                    )
-                )
-            old_environ = dict(os.environ)
-            os.environ["TEMP_DIR"] = tmp_dir
-            os.environ["BACKEND"] = backend
-            os.environ["INIT_METHOD"] = "env://"
-            os.environ.update(env_vars)
-            if with_init_file:
-                if test_module == "test_distributed_spawn":
-                    init_method = f"{FILE_SCHEMA}{tmp_dir}/"
-                else:
-                    init_method = f"{FILE_SCHEMA}{tmp_dir}/shared_init_file"
-                os.environ["INIT_METHOD"] = init_method
-            try:
-                os.mkdir(os.path.join(tmp_dir, "barrier"))
-                os.mkdir(os.path.join(tmp_dir, "test_dir"))
-                if backend == "mpi":
-                    # test mpiexec for --noprefix option
-                    with open(os.devnull, "w") as devnull:
-                        allowrunasroot_opt = (
-                            "--allow-run-as-root"
-                            if subprocess.call(
-                                'mpiexec --allow-run-as-root -n 1 bash -c ""',
-                                shell=True,
-                                stdout=devnull,
-                                stderr=subprocess.STDOUT,
-                            )
-                            == 0
-                            else ""
-                        )
-                        noprefix_opt = (
-                            "--noprefix"
-                            if subprocess.call(
-                                f'mpiexec {allowrunasroot_opt} -n 1 --noprefix bash -c ""',
-                                shell=True,
-                                stdout=devnull,
-                                stderr=subprocess.STDOUT,
-                            )
-                            == 0
-                            else ""
-                        )
-
-                    mpiexec = ["mpiexec", "-n", "3", noprefix_opt, allowrunasroot_opt]
-
-                    return_code = run_test(
-                        test_module, test_directory, options, launcher_cmd=mpiexec
-                    )
-                else:
-                    return_code = run_test(test_module, test_directory, options, extra_unittest_args=["--subprocess"])
-                if return_code != 0:
-                    return return_code
-            finally:
-                shutil.rmtree(tmp_dir)
-                os.environ.clear()
-                os.environ.update(old_environ)
+        import multiprocessing as mp
+        p = mp.Process(target=test_distributed_config, args=(
+            test_module, ret_queue, test_directory, options, backend, env_vars))
+        p.start()
+        procs.append(p)
+    for p in procs:
+        p.join()
+        ret_code = ret_queue.get()
+        if ret_code != 0:
+            return ret_code
     return 0
 
 
@@ -964,7 +973,7 @@ def get_selected_tests(options):
             print(
                 "::warning:: Gathered no stats from artifacts. Proceeding with default sharding plan."
             )
-            selected_tests = selected_tests[which_shard - 1 :: num_shards]
+            selected_tests = selected_tests[which_shard - 1:: num_shards]
         else:
             print("Found test time stats from artifacts")
             test_file_times_config = test_file_times[test_config]
