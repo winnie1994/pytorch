@@ -498,6 +498,7 @@ parser.add_argument('--accept', action='store_true')
 parser.add_argument('--jit_executor', type=str)
 parser.add_argument('--repeat', type=int, default=1)
 parser.add_argument('--test_bailouts', action='store_true')
+parser.add_argument('--use-pytest', action='store_true')
 parser.add_argument('--save-xml', nargs='?', type=str,
                     const=_get_test_report_path(),
                     default=_get_test_report_path() if IS_CI else None)
@@ -533,6 +534,7 @@ DISABLED_TESTS_FILE = args.import_disabled_tests
 LOG_SUFFIX = args.log_suffix
 RUN_PARALLEL = args.run_parallel
 TEST_BAILOUTS = args.test_bailouts
+USE_PYTEST = args.use_pytest
 TEST_DISCOVER = args.discover_tests
 TEST_IN_SUBPROCESS = args.subprocess
 TEST_SAVE_XML = args.save_xml
@@ -750,9 +752,7 @@ def run_tests(argv=UNITTEST_ARGS):
         test_report_path = TEST_SAVE_XML + LOG_SUFFIX
         test_report_path = os.path.join(test_report_path, test_filename)
         build_environment = os.environ.get("BUILD_ENVIRONMENT", "")
-        if test_filename in PYTEST_FILES and not IS_SANDCASTLE and not (
-            "cuda" in build_environment and "linux" in build_environment
-        ):
+        if USE_PYTEST:
             # exclude linux cuda tests because we run into memory issues when running in parallel
             import pytest
             os.environ["NO_COLOR"] = "1"
@@ -760,15 +760,14 @@ def run_tests(argv=UNITTEST_ARGS):
             pytest_report_path = test_report_path.replace('python-unittest', 'python-pytest')
             os.makedirs(pytest_report_path, exist_ok=True)
             # part of our xml parsing looks for grandparent folder names
-            pytest_report_path = os.path.join(pytest_report_path, f"{test_filename}.xml")
+            pytest_report_path = os.path.join(pytest_report_path, f"{test_filename}-{os.urandom(8).hex()}.xml")
             print(f'Test results will be stored in {pytest_report_path}')
             # mac slower on 4 proc than 3
             num_procs = 3 if "macos" in build_environment else 4
             # f = failed
             # E = error
             # X = unexpected success
-            exit_code = pytest.main(args=[inspect.getfile(sys._getframe(1)), '-vv', '-x',
-                                    '--reruns=2', '-rfEX', f'--junit-xml-reruns={pytest_report_path}'])
+            exit_code = pytest.main(args=argv + [f'--junit-xml-reruns={pytest_report_path}'])
             del os.environ["USING_PYTEST"]
             sanitize_pytest_xml(f'{pytest_report_path}')
             print("Skip info is located in the xml test reports, please either go to s3 or the hud to download them")
@@ -908,7 +907,8 @@ TEST_WITH_CROSSREF = os.getenv('PYTORCH_TEST_WITH_CROSSREF', '0') == '1'
 if (
     TEST_CUDA and 'PARALLEL_TESTING' in os.environ
 ):
-    torch.cuda.set_per_process_memory_fraction(0.21)
+    print("parllel testing flag")
+    torch.cuda.set_per_process_memory_fraction(0.14)
 
 def skipIfCrossRef(fn):
     @wraps(fn)
