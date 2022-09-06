@@ -8,7 +8,6 @@ from distutils.version import LooseVersion
 import functools
 import os
 import pathlib
-import queue
 import shutil
 import signal
 import subprocess
@@ -1123,28 +1122,10 @@ def run_test_module(test: str, test_directory: str, options, log_file=None) -> O
     return message
 
 
-def mp_run_test_module(test_tasks: mp.Queue, ret_queue: mp.Queue, abort_queue: mp.Queue, test_directory, options):
-    try:
-        while abort_queue.empty():
-            test = test_tasks.get_nowait()
-            log_fd, log_path = tempfile.mkstemp(dir=REPO_ROOT / "test" / "test-reports", prefix=test)
-            message = run_test_module(test, test_directory, options, log_file=log_fd)
-            ret_queue.put_nowait((test, message, log_path))
-    except queue.Empty as e:
-        return
-
-
-def handle_test_completion(ret_queue: mp.Queue, abort_queue: mp.Queue, failure_messages, continue_through_error):
-    test, err_message, log_file_path = ret_queue.get()
-    print_log_file(test, log_file_path)
-    if err_message is None:
-        return True
-    failure_messages.append(err_message)
-    if not continue_through_error:
-        abort_queue.put_nowait("stop")
-        raise RuntimeError(err_message)
-    print_to_stderr(err_message)
-    return False
+def mp_run_test_module(test, test_directory, options):
+    log_fd, log_path = tempfile.mkstemp(dir=REPO_ROOT / "test" / "test-reports", prefix=test)
+    message = run_test_module(test, test_directory, options, log_file=log_fd)
+    return test, message, log_path
 
 
 def main():
@@ -1172,24 +1153,29 @@ def main():
     selected_tests_parallel = [x for x in selected_tests if not must_serial(x)]
     selected_tests_serial = [x for x in selected_tests if x not in selected_tests_parallel]
 
-    test_tasks = mp.Queue()
-    ret_queue = mp.Queue()
-    abort_queue = mp.Queue()
-    for test in selected_tests_parallel:
-        test_tasks.put(test)
-    procs = []
     proc_limit = 3
+    pool = mp.Pool(proc_limit, maxtasksperchild=1)
     os.makedirs(REPO_ROOT / "test" / "test-reports", exist_ok=True)
+
+    def success_callback(res):
+        test, err_message, log_file_path = res
+        print_log_file(test, log_file_path)
+        if err_message is None:
+            return True
+        failure_messages.append(err_message)
+        if not options.continue_through_error:
+            pool.terminate()
+            raise RuntimeError(err_message)
+        print_to_stderr(err_message)
+        return False
+
     try:
         os.environ['PARALLEL_TESTING'] = '1'
-        for i in range(proc_limit):
-            p = mp.Process(target=mp_run_test_module, args=(
-                test_tasks, ret_queue, abort_queue, test_directory, copy.deepcopy(options)))
-            p.start()
-            procs.append(p)
-
-        for i in range(len(selected_tests_parallel)):
-            handle_test_completion(ret_queue, abort_queue, failure_messages, options.continue_through_error)
+        for test in selected_tests_parallel:
+            pool.apply_async(mp_run_test_module, args=(test, test_directory,
+                             copy.deepcopy(options)), callback=success_callback)
+        pool.close()
+        pool.join()
 
         del os.environ['PARALLEL_TESTING']
 
@@ -1200,16 +1186,13 @@ def main():
             err_message = run_test_module(test, test_directory, options_clone)
             if err_message is None:
                 continue
-            has_failed = True
             failure_messages.append(err_message)
             if not options_clone.continue_through_error:
                 raise RuntimeError(err_message)
             print_to_stderr(err_message)
     finally:
-        for p in procs:
-            p.join()
-        while not ret_queue.empty():
-            handle_test_completion(ret_queue, abort_queue, failure_messages, options.continue_through_error)
+        pool.terminate()
+        pool.join()
 
         if options.coverage:
             from coverage import Coverage
