@@ -694,7 +694,8 @@ def run_large_test(test_module, test_directory, options):
     os.environ["PARALLEL_TESTING"] = "1"
     pool = mp.Pool(num_procs)
     for i in range(num_procs):
-        log_fd, file_path = tempfile.mkstemp(dir=REPO_ROOT / "test" / "test-reports", prefix=test_module)
+        log_fd, file_path = tempfile.mkstemp(dir=REPO_ROOT / "test" / "test-reports",
+                                             prefix=test_module.replace("\\", "-").replace("/", "-"))
         return_code = pool.apply_async(run_test, args=(test_module, test_directory, copy.deepcopy(options)),
                                        kwds={"extra_unittest_args": ["--use-pytest", '-vv', '-x', '--reruns=2', '-rfEX',
                                                                      f'--shard-id={i}', f'--num-shards={num_procs}',
@@ -1123,7 +1124,8 @@ def run_test_module(test: str, test_directory: str, options, log_file=None) -> O
 
 
 def mp_run_test_module(test, test_directory, options):
-    log_fd, log_path = tempfile.mkstemp(dir=REPO_ROOT / "test" / "test-reports", prefix=test)
+    log_fd, log_path = tempfile.mkstemp(dir=REPO_ROOT / "test" / "test-reports",
+                                        prefix=test.replace("\\", "-").replace("/", "-"))
     message = run_test_module(test, test_directory, options, log_file=log_fd)
     return test, message, log_path
 
