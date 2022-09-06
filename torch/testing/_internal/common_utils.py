@@ -904,10 +904,7 @@ TEST_SKIP_FAST = os.getenv('PYTORCH_TEST_SKIP_FAST', '0') == '1'
 TEST_WITH_CROSSREF = os.getenv('PYTORCH_TEST_WITH_CROSSREF', '0') == '1'
 
 
-if (
-    TEST_CUDA and 'PARALLEL_TESTING' in os.environ
-):
-    print("parllel testing flag")
+if TEST_CUDA and 'PARALLEL_TESTING' in os.environ:
     torch.cuda.set_per_process_memory_fraction(0.14)
 
 def skipIfCrossRef(fn):
