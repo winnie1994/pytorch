@@ -29,7 +29,6 @@ using CuSolverDnPoolType = DeviceThreadHandlePool<cusolverDnHandle_t, createCuso
 } // namespace
 
 cusolverDnHandle_t getCurrentCUDASolverDnHandle() {
-  c10::cuda::device_synchronize();
   int device;
   AT_CUDA_CHECK(cudaGetDevice(&device));
 
