@@ -1154,6 +1154,8 @@ def main():
 
     selected_tests_parallel = [x for x in selected_tests if not must_serial(x)]
     selected_tests_serial = [x for x in selected_tests if x not in selected_tests_parallel]
+    print_to_stderr("parallel tests:\n {}".format("\n ".join(selected_tests_parallel)))
+    print_to_stderr("serial tests:\n {}".format("\n ".join(selected_tests_serial)))
 
     proc_limit = 3
     pool = mp.Pool(proc_limit, maxtasksperchild=1)
@@ -1174,10 +1176,15 @@ def main():
     try:
         os.environ['PARALLEL_TESTING'] = '1'
         for test in selected_tests_parallel:
+            print(f"starting {test}")
             pool.apply_async(mp_run_test_module, args=(test, test_directory,
                              copy.deepcopy(options)), callback=success_callback)
+            print(f"starting finished {test}")
+        print("all tasks started")
         pool.close()
+        print("pool closed")
         pool.join()
+        print("pool joined")
 
         del os.environ['PARALLEL_TESTING']
 
