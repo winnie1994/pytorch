@@ -4082,6 +4082,31 @@ class TestQuantizeFx(QuantizationTestCase):
             if n.target == "lstm":
                 self.assertEqual(type(n.args[1]), tuple)
 
+    def test_lstm(self):
+        """
+        Test FX static quantization for LSTM.
+        """
+        from typing import Tuple
+        class MyModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lstm = nn.LSTM(50, 50, 1)
+
+            def forward(self, inputs: torch.Tensor, h0: torch.Tensor, c0: torch.Tensor):
+                return self.lstm(inputs, (h0, c0))
+
+        m = MyModel()
+        qconfig_mapping = get_default_qconfig_mapping()
+        prepare_custom_config = PrepareCustomConfig() \
+            .set_float_to_observed_mapping(torch.nn.LSTM, torch.ao.nn.quantizable.LSTM)
+        convert_custom_config = ConvertCustomConfig() \
+            .set_observed_to_quantized_mapping(torch.ao.nn.quantizable.LSTM, torch.ao.nn.quantized.LSTM)
+        example_inputs = (torch.rand(5, 3, 50), torch.rand(1, 3, 50), torch.randn(1, 3, 50))
+        m = prepare_fx(m, qconfig_mapping, example_inputs, prepare_custom_config=prepare_custom_config)
+        m(*example_inputs)
+        m = convert_fx(m, convert_custom_config=convert_custom_config)
+        m(*example_inputs)
+
     def test_relu_lowering(self):
         class M(torch.nn.Module):
             def forward(self, x):

@@ -722,6 +722,88 @@ def maybe_insert_input_equalization_observers_for_node(
     # assign the new args and kwargs to the node, inplace
     node.args = tuple(new_args)
 
+def _is_custom_module_lstm(node: Node) -> bool:
+    """
+    Return whether this refers to the custom module LSTM flow.
+    """
+    # TODO(andrew): differentiate this from dynamic quantization
+    return node.op == "call_module" and node.target == "lstm"
+
+def _insert_observers_for_custom_module_lstm(
+        node: Node,
+        observer: ObserverBase,
+        model: torch.nn.Module,
+        modules: Dict[str, torch.nn.Module],
+        graph: Graph) -> Node:
+    """
+    Insert observers for the LSTM node in the custom module flow.
+
+    This assumes the LSTM node returns a nested tuple of the format
+    (output, (hidden0, hidden1)) and performs the following transformation:
+
+    Before:
+
+                    lstm_node
+                       |
+                       v
+                  original_user(s)
+
+    After:
+
+                    lstm_node
+                  /           \\
+                 /  (getitem)  \\
+                /               \\
+               v                 v
+             output            hidden
+               |               /   \\
+               v              (getitem)
+           output_obs        /       \\
+               |            v         v
+               |         hidden0    hidden1
+               |            |         |
+               |            v         v
+               |     hidden0_obs   hidden1_obs
+               |            \\       /
+               |              (tuple)
+               |              \\   /
+               |               v  v
+               |             hidden_obs
+               \\               /
+                \\   (tuple)   /
+                 v            v
+                  lstm_node_obs
+                       |
+                       v
+                  original_user(s)
+
+    Return the node `lstm_node_obs`.
+    """
+    if not _is_custom_module_lstm(node):
+        raise ValueError("Expected an LSTM node from the custom module flow")
+    original_users = list(node.users.keys())
+    # Split LSTM output into (output, (hidden0, hidden1)) and observe all three nodes separately
+    with graph.inserting_after(node):
+        output = graph.call_function(operator.getitem, (node, 0))
+        output_obs = insert_observer(output, observer, model, modules, graph)
+    with graph.inserting_after(output_obs):
+        hidden = graph.call_function(operator.getitem, (node, 1))
+    with graph.inserting_after(hidden):
+        hidden0 = graph.call_function(operator.getitem, (hidden, 0))
+        hidden0_obs = insert_observer(hidden0, observer, model, modules, graph)
+    with graph.inserting_after(hidden0_obs):
+        hidden1 = graph.call_function(operator.getitem, (hidden, 1))
+        hidden1_obs = insert_observer(hidden1, observer, model, modules, graph)
+    # Recombine the three nodes using the same nested format
+    with graph.inserting_after(hidden1_obs):
+        hidden_obs = graph.call_function(tuple, ([hidden0_obs, hidden1_obs],))
+    with graph.inserting_after(hidden_obs):
+        lstm_node_obs = graph.call_function(tuple, ([output_obs, hidden_obs],))
+    # Connect users of the original node to the recombined tuple node
+    for user in original_users:
+        user.replace_input_with(node, lstm_node_obs)
+    return lstm_node_obs
+
 def maybe_insert_output_observer_for_node(
     node: Node,
     model: torch.nn.Module,
@@ -770,8 +852,11 @@ def maybe_insert_output_observer_for_node(
                 matched_pattern,
                 is_qat)
         observer = act_post_process_ctr()
-        new_obs = insert_observer(node, observer, model, modules, graph)
-        return new_obs
+
+        if _is_custom_module_lstm(node):
+            return _insert_observers_for_custom_module_lstm(node, observer, model, modules, graph)
+        else:
+            return insert_observer(node, observer, model, modules, graph)
     else:
         return None
 
@@ -1256,26 +1341,27 @@ def insert_observers_for_model(
                             node, model, modules, graph, matches,
                             node_name_to_target_dtype, pattern, qhandler, is_qat)
                         if maybe_output_obs_node is not None:
-                            # Update users of original node to use the output observer
-                            # instead. For example, change
-                            #
-                            #           next_node
-                            #          /
-                            #   cur_node -> obs
-                            #
-                            # to
-                            #
-                            #                 next_node
-                            #                 /
-                            #   cur_node -> obs
-                            #
-                            # We need to save orig users before updating uses because
-                            # the list of users will change as we update uses
-                            orig_users = list(node.users.keys())
-                            for user_node in orig_users:
-                                if user_node is maybe_output_obs_node:
-                                    continue
-                                user_node.replace_input_with(node, maybe_output_obs_node)
+                            if not _is_custom_module_lstm(node):
+                                # Update users of original node to use the output observer
+                                # instead. For example, change
+                                #
+                                #           next_node
+                                #          /
+                                #   cur_node -> obs
+                                #
+                                # to
+                                #
+                                #                 next_node
+                                #                 /
+                                #   cur_node -> obs
+                                #
+                                # We need to save orig users before updating uses because
+                                # the list of users will change as we update uses
+                                orig_users = list(node.users.keys())
+                                for user_node in orig_users:
+                                    if user_node is maybe_output_obs_node:
+                                        continue
+                                    user_node.replace_input_with(node, maybe_output_obs_node)
 
                             is_observer_in_same_graph_ = is_observer_in_same_graph(node, modules, node_name_to_target_dtype)
 
