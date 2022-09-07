@@ -1161,7 +1161,7 @@ def main():
     print_to_stderr("serial tests:\n {}".format("\n ".join(selected_tests_serial)))
 
     proc_limit = 3
-    pool = mp.Pool(proc_limit, maxtasksperchild=1)
+    pool = mp.get_context("spawn").Pool(proc_limit, maxtasksperchild=1)
     os.makedirs(REPO_ROOT / "test" / "test-reports", exist_ok=True)
 
     def success_callback(res):
