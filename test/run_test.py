@@ -1126,7 +1126,10 @@ def run_test_module(test: str, test_directory: str, options, log_file=None) -> O
 def mp_run_test_module(test, test_directory, options):
     log_fd, log_path = tempfile.mkstemp(dir=REPO_ROOT / "test" / "test-reports",
                                         prefix=test.replace("\\", "-").replace("/", "-"))
-    message = run_test_module(test, test_directory, options, log_file=log_fd)
+    print(log_path)
+    os.close(log_fd)
+    message = run_test_module(test, test_directory, options, log_file=log_path)
+    print(f"{test} done")
     return test, message, log_path
 
 
