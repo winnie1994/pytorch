@@ -7,6 +7,7 @@ import operator
 import random
 import unittest
 import math
+import pytest
 
 import torch
 import numpy as np
@@ -13439,6 +13440,9 @@ op_db: List[OpInfo] = [
            supports_forward_ad=True,
            supports_fwgrad_bwgrad=True,
            skips=(
+               DecorateInfo(pytest.mark.serial, 'TestGradients', 'test_fn_gradgrad', dtypes=(torch.float64), device_type='cuda'),
+               DecorateInfo(pytest.mark.serial, 'TestGradients', 'test_forward_mode_AD', dtypes=(torch.float64),
+                            device_type='cuda'),
            )),
     OpInfo('unique',
            dtypes=all_types_and(torch.bool, torch.bfloat16),
