@@ -699,7 +699,7 @@ def run_large_test(test_module, test_directory, options):
         return_code = pool.apply_async(run_test, args=(test_module, test_directory, copy.deepcopy(options)),
                                        kwds={"extra_unittest_args": ["--use-pytest", '-vv', '-x', '--reruns=2', '-rfEX',
                                                                      f'--shard-id={i}', f'--num-shards={num_procs}',
-                                                                     "-k=not _lu_ and not _ldl_solve_ and not _linalg_cholesky_"
+                                                                     "-k=not _lu_ and not _ldl_solve_ and not _linalg_cholesky_",
                                                                      "-m=not serial"],
                                              "log_file": file_path
                                              })
